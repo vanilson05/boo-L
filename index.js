@@ -8,6 +8,7 @@ import Anthropic from "@anthropic-ai/sdk";
 import qrcode from "qrcode-terminal";
 import pino from "pino";
 import { JSONFilePreset } from "lowdb/node";
+import { existsSync } from "fs";
 
 const ANTHROPIC_API_KEY = process.env.ANTHROPIC_API_KEY;
 if (!ANTHROPIC_API_KEY) {
@@ -66,6 +67,7 @@ const historicos = new Map();
 const ultimaAtividade = new Map();
 const filaProcessamento = new Map();
 let fdsJaEnviado = false;
+const ARQUIVO_PAUSA = "./pausado.txt";
 
 function getHistorico(tel) {
   if (!historicos.has(tel)) historicos.set(tel, []);
@@ -241,6 +243,27 @@ async function chamarIA(telefone, texto) {
   return { texto: limpo, agendamento, linkSeparado };
 }
 
+async function analisarImagem(base64, mediaType) {
+  const response = await anthropic.messages.create({
+    model: "claude-haiku-4-5-20251001",
+    max_tokens: 1024,
+    messages: [{
+      role: "user",
+      content: [
+        {
+          type: "image",
+          source: { type: "base64", media_type: mediaType, data: base64 }
+        },
+        {
+          type: "text",
+          text: `Analise essa imagem. Se for um comprovante de pagamento/transferência, extraia: valor pago, data, nome do destinatário ou banco. Responda em português de forma curta e confirme se é um comprovante válido. Se não for comprovante, diga apenas: "NÃO_COMPROVANTE".`
+        }
+      ]
+    }]
+  });
+  return response.content[0].text;
+}
+
 async function processarMensagens(sock, telefone, mensagens) {
   const textoCompleto = mensagens.join("\n");
   try {
@@ -389,7 +412,7 @@ async function iniciarBot() {
       const isAudio = tipoMensagem === "audioMessage" || tipoMensagem === "pttMessage";
 
       // Bot pausado — ignora mensagens
-      if (botPausado) {
+      if (existsSync(ARQUIVO_PAUSA)) {
         console.log(`⏸️ Bot pausado — mensagem de ${telefone} ignorada`);
         continue;
       }
@@ -398,6 +421,44 @@ async function iniciarBot() {
       if (isAudio) {
         salvarAudioPendente(telefone);
         console.log(`🎤 Áudio salvo de ${telefone}`);
+        continue;
+      }
+
+      // Imagem — tenta analisar como comprovante
+      const isImagem = tipoMensagem === "imageMessage";
+      if (isImagem) {
+        console.log(`🖼️ Imagem recebida de ${telefone}`);
+        try {
+          const imgMsg = msg.message.imageMessage;
+          const stream = await sock.downloadMediaMessage(msg);
+          const chunks = [];
+          for await (const chunk of stream) chunks.push(chunk);
+          const buffer = Buffer.concat(chunks);
+          const base64 = buffer.toString("base64");
+          const mediaType = imgMsg.mimetype || "image/jpeg";
+
+          await sock.sendPresenceUpdate("composing", telefone);
+          const analise = await analisarImagem(base64, mediaType);
+
+          if (analise.includes("NÃO_COMPROVANTE")) {
+            await sock.sendMessage(telefone, {
+              text: "Recebi sua imagem, mas não consigo identificar o que é 😊 Pode me explicar em texto o que precisa?"
+            });
+          } else {
+            await sock.sendMessage(telefone, {
+              text: `✅ Comprovante recebido! ${analise}
+
+Vou registrar e o responsável confirma em breve 👍`
+            });
+            salvarAgendamento(telefone, "não informado", "comprovante_pagamento", analise);
+            console.log(`🧾 Comprovante salvo de ${telefone}`);
+          }
+        } catch (e) {
+          console.error("❌ Erro ao analisar imagem:", e.message);
+          await sock.sendMessage(telefone, {
+            text: "Recebi sua imagem 😊 Pode me descrever em texto o que precisa?"
+          });
+        }
         continue;
       }
 
