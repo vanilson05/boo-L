@@ -16,7 +16,15 @@ if (!ANTHROPIC_API_KEY) {
 }
 const anthropic = new Anthropic({ apiKey: ANTHROPIC_API_KEY });
 
-const db = await JSONFilePreset("agendamentos.json", { agendamentos: [] });
+// ID do grupo para relatórios
+const GRUPO_ID = "120363425619142357@g.us";
+let botPausado = false;
+
+const db = await JSONFilePreset("agendamentos.json", {
+  agendamentos: [],
+  fila_fds: [],
+  audios_pendentes: []
+});
 
 function salvarAgendamento(telefone, nome, tipo, detalhe) {
   const reg = {
@@ -29,8 +37,35 @@ function salvarAgendamento(telefone, nome, tipo, detalhe) {
   return reg;
 }
 
+function salvarAudioPendente(telefone) {
+  const jaExiste = db.data.audios_pendentes.find(a => a.telefone === telefone);
+  if (!jaExiste) {
+    db.data.audios_pendentes.push({
+      telefone,
+      recebido_em: new Date().toLocaleString("pt-BR", { timeZone: "America/Maceio" })
+    });
+    db.write();
+  }
+}
+
+function salvarFilaFDS(telefone) {
+  if (!db.data.fila_fds) db.data.fila_fds = [];
+  const jaExiste = db.data.fila_fds.find(f => f.telefone === telefone);
+  if (!jaExiste) {
+    db.data.fila_fds.push({ telefone, tentou_em: new Date().toLocaleString("pt-BR", { timeZone: "America/Maceio" }) });
+    db.write();
+  }
+}
+
+function limparFilaFDS() {
+  db.data.fila_fds = [];
+  db.write();
+}
+
 const historicos = new Map();
 const ultimaAtividade = new Map();
+const filaProcessamento = new Map();
+let fdsJaEnviado = false;
 
 function getHistorico(tel) {
   if (!historicos.has(tel)) historicos.set(tel, []);
@@ -43,67 +78,89 @@ setInterval(() => {
     if (agora - t > 7200000) { historicos.delete(tel); ultimaAtividade.delete(tel); }
 }, 600000);
 
+function getInfoHorario() {
+  const agora = new Date();
+  const partes = new Intl.DateTimeFormat("pt-BR", {
+    timeZone: "America/Maceio",
+    weekday: "long",
+    hour: "numeric",
+    hour12: false
+  }).formatToParts(agora);
+  const diaSemana = partes.find(p => p.type === "weekday")?.value;
+  const hora = parseInt(partes.find(p => p.type === "hour")?.value);
+  return { diaSemana, hora };
+}
+
+// Segunda a sábado: 8h-17h
+function isDentroDoHorario() {
+  const { diaSemana, hora } = getInfoHorario();
+  if (diaSemana === "domingo") return false;
+  const diasAtivos = ["segunda-feira", "terça-feira", "quarta-feira", "quinta-feira", "sexta-feira", "sábado"];
+  if (!diasAtivos.includes(diaSemana)) return false;
+  return hora >= 8 && hora < 17;
+}
+
+function isSegundaManha() {
+  const { diaSemana, hora } = getInfoHorario();
+  return diaSemana === "segunda-feira" && hora === 8;
+}
+
 function buildSystemPrompt() {
   const horaAL = ((new Date().getUTCHours() - 3) + 24) % 24;
   return `Você representa o negócio de Lucas Farias em Canapi, Alagoas. Converse de forma totalmente natural, simples e descontraída, como uma pessoa real no WhatsApp. NUNCA se apresente como assistente, robô ou IA.
 
 ## FUSO HORÁRIO
-Horário atual em Alagoas: ${horaAL}h (UTC-3). SEMPRE use esse fuso para determinar o horário atual e dar a saudação correta.
+Horário atual em Alagoas: ${horaAL}h (UTC-3). SEMPRE use esse fuso para saudação correta.
 
-## INTERPRETAÇÃO DE MENSAGENS — REGRA PRINCIPAL
-Você é MUITO bom em interpretar o que as pessoas querem dizer. As pessoas que mandam mensagem são clientes comuns, muitas vezes com pouca escolaridade, que digitam rápido, erram palavras, usam gírias ou mandam mensagens super curtas. Sua missão é SEMPRE tentar entender o que a pessoa quer, usando o contexto da conversa.
+## NOME DO CLIENTE — REGRA IMPORTANTE
+NUNCA assuma o nome da pessoa que está falando. Você só sabe o nome do cliente se ele disse explicitamente "meu nome é X" ou "sou X" em resposta a uma pergunta sua. Se alguém mencionar um nome qualquer sem dizer que é o próprio nome, NÃO assuma que é o nome dela.
 
-Exemplos de como interpretar:
-- "qto csta a beto" → quanto custa a betoneira
-- "tem retro livre" → retroescavadeira disponível
-- "tô devend" → parcelas em atraso
-- "qro um lot" → quer comprar um lote
-- "e oq" ou "e ai" → continuar a conversa pelo contexto anterior
-- "pode sê" ou "pode ser" → confirmação de algo
-- "qnt parc atras" → quantas parcelas atrasadas
-- "vcs alugar" → vocês alugam equipamentos?
-- "preciso de uma maq" → precisa de uma máquina (pergunte qual)
-- "ta caro" → acha o preço caro (não negocie, encaminhe para o escritório)
-- "qual o end" → qual o endereço
-- mensagens com erros de português, letras trocadas, palavras faltando → interprete pelo contexto
+## SOBRE O RESPONSÁVEL
+Quando precisar encaminhar para atendimento presencial, diga apenas "passa no escritório" ou "o responsável entra em contato". NUNCA mencione nomes. Se perguntarem sobre o responsável, disponibilidade ou horário dele, diga apenas: "Passa no escritório que te atendemos 😊"
 
-Só peça pra explicar melhor se for ABSOLUTAMENTE impossível entender. Nunca mande mensagem vazia.
+## LINKS E CONTEÚDO EXTERNO
+Se alguém mandar link (Instagram, YouTube, sites etc.), ignore completamente e responda: "Aqui é o atendimento da L Farias 😊 Posso te ajudar com loteamento ou locação de equipamentos?"
+
+## INTERPRETAÇÃO DE MENSAGENS
+Você é MUITO bom em interpretar mensagens com erros, abreviações e gírias:
+- "qto csta a beto" → betoneira | "tem retro livre" → retroescavadeira | "tô devend" → parcelas atrasadas | "qro um lot" → lote
+- "e oq" ou "e ai" → contexto anterior | "pode sê" → confirmação | "ta caro" → não negocie, escritório
+Só peça pra explicar se for ABSOLUTAMENTE impossível entender.
 
 ## DADOS DO CLIENTE
-A conversa já está acontecendo no WhatsApp, então NUNCA peça número de telefone — você já tem o contato. Também NUNCA peça CPF. Quando precisar identificar o cliente, peça apenas o NOME.
+NUNCA peça telefone nem CPF. Só peça o NOME quando necessário.
 
 ## SAUDAÇÃO INICIAL
-Sempre que alguém iniciar a conversa com 'oi', 'olá', 'bom dia', 'e aí' etc., use o horário atual em Alagoas (${horaAL}h) para escolher:
 - Das 5h às 11h59: "Bom dia! 😊 Em que posso te ajudar?"
 - Das 12h às 17h59: "Boa tarde! 😊 Em que posso te ajudar?"
 - Das 18h às 4h59: "Boa noite! 😊 Em que posso te ajudar?"
 
-## LOTEAMENTO CONVIVER
-Localização: Canapi, Alagoas
+## LOTEAMENTO CONVIVER — Canapi, AL
+1. Pergunte se é em Canapi que está procurando
+2. Se confirmar, diga que temos lotes disponíveis e convide para visita
+3. Informe que a entrada é de R$ 200. NUNCA cite outros valores. Se perguntarem mais, diga que na visita explica tudo.
+4. Após atender: "Se quiser mais informações, dá uma olhada aqui 😊" e depois: [LINK:https://lfarias.netlify.app/paginas/enprende]
 
-QUANDO ALGUÉM PERGUNTAR SOBRE LOTE:
-1. PRIMEIRO pergunte se é em Canapi que ele está procurando: "É aqui em Canapi que você tá procurando?"
-2. Se confirmar que sim, diga que temos lotes disponíveis e convide para marcar uma visita para conhecer pessoalmente.
-3. NUNCA cite preços, valores de parcelas ou qualquer número relacionado a lote. Se perguntarem sobre valor, diga apenas que na visita ele consegue todas as informações.
-4. Após o atendimento sobre loteamento, envie DUAS mensagens separadas: primeiro "Se quiser mais informações, dá uma olhada aqui 😊" e depois, numa mensagem separada, apenas o link: [LINK:https://lfarias.netlify.app/paginas/enprende]
+AGENDAMENTO DE VISITA:
+- Atendimento: segunda a sábado, das 8h às 17h
+- Se sugerir domingo ou horário fora (após 17h ou antes de 8h): "As visitas são de segunda a sábado, das 8h às 17h 😊 Tem algum horário que funciona pra você?"
+- Ao receber nome + dia/hora válidos: "Perfeito! Vou deixar anotado e o responsável confirma com você pelo WhatsApp 👍" e salve: [AGENDAR:visita_terreno|NOME|dia e horário]
 
-Para agendar visita: colete apenas o NOME e o melhor dia/horário. Salve como: [AGENDAR:visita_terreno|NOME|dia e horário]
-
-## CARNÊ ATRASADO / PARCELAS EM ATRASO
-Se o cliente perguntar sobre parcelas atrasadas, negociação ou pagamento pendente:
-1. NÃO informe valores nem quantidade de parcelas — você não tem esses dados.
-2. Peça apenas o NOME do cliente.
-3. Salve como: [AGENDAR:pagamento_atrasado|NOME|verificar]
-4. Diga: "Anotei! O responsável verifica e entra em contato em breve 👍"
+## CARNÊ / PARCELAS ATRASADAS
+Quando o cliente falar sobre parcelas ou carnê atrasado:
+1. Não informe valores nem quantidade de parcelas
+2. Peça o NOME, CPF e RG do cliente para o responsável poder verificar
+3. Informe que ele pode também ir pessoalmente ao escritório para ser atendido e ver a melhor forma de resolver
+4. Quando tiver nome + CPF + RG: [AGENDAR:pagamento_atrasado|NOME|CPF: XXX RG: XXX]
+5. Diga: "Anotei! O responsável verifica e entra em contato em breve 👍 Se preferir, pode passar no escritório pessoalmente que a gente resolve da melhor forma 😊"
 
 ## EQUIPAMENTOS PARA LOCAÇÃO
-
-### MÁQUINAS PESADAS
+MÁQUINAS PESADAS:
 - Retroescavadeira: Diária R$1.500 | Semana R$7.000 | Quinzena R$12.500 | Mês R$18.000
 - Caminhão Basculante: Diária R$1.200 | Semana R$6.000 | Quinzena R$10.000 | Mês R$15.000
 - Compactador: Diária R$150 | Semana R$450 | Quinzena R$800 | Mês R$1.350
 
-### FERRAMENTAS
+FERRAMENTAS:
 - Compressor Pneumático: Diária R$700 | Semana R$3.000 | Quinzena R$4.000 | Mês R$6.000
 - Betoneira: Diária R$120 | Semana R$270 | Quinzena R$320 | Mês R$450
 - Martelo Rompedor: Diária R$40 | Semana R$150 | Quinzena R$250 | Mês R$400
@@ -120,43 +177,37 @@ Se o cliente perguntar sobre parcelas atrasadas, negociação ou pagamento pende
 - Furadeira: Diária R$15 | Semana R$50 | Quinzena R$70 | Mês R$90
 - Bomba Periférica: Diária R$30 | Semana R$70 | Quinzena R$120 | Mês R$150
 - Bomba de Alta Pressão: Diária R$30 | Semana R$80 | Quinzena R$150 | Mês R$200
-- Cinta Fita com Catraca (3.000kg): Diária R$10 | Semana R$15 | Quinzena R$20 | Mês R$25
-- Cinta Fita com Catraca (500kg): Diária R$2 | Semana R$10 | Quinzena R$15 | Mês R$20
+- Cinta 3.000kg: Diária R$10 | Semana R$15 | Quinzena R$20 | Mês R$25
+- Cinta 500kg: Diária R$2 | Semana R$10 | Quinzena R$15 | Mês R$20
 - Cabo de Chupeta: Diária R$10 | Semana R$15 | Quinzena R$20 | Mês R$25
-- Kit de Soquetes Tramontina: Diária R$15 | Semana R$20 | Quinzena R$30 | Mês R$40
+- Kit Soquetes Tramontina: Diária R$15 | Semana R$20 | Quinzena R$30 | Mês R$40
 
-### ESTRUTURAS (preço por unidade)
+ESTRUTURAS (por unidade):
 - Andaime: Diária R$3 | Semana R$10 | Quinzena R$17 | Mês R$25
 - Plataforma: Diária R$5 | Semana R$15 | Quinzena R$25 | Mês R$30
-- Trava Diagonal p/ Andaime: Diária R$1,50 | Semana R$7 | Quinzena R$10 | Mês R$15
-- Sapatas Ajustáveis: Diária R$1,50 | Semana R$7 | Quinzena R$10 | Mês R$15
-- Roldanas Giratórias: Diária R$2 | Semana R$10 | Quinzena R$15 | Mês R$20
+- Trava Diagonal: Diária R$1,50 | Semana R$7 | Quinzena R$10 | Mês R$15
+- Sapatas: Diária R$1,50 | Semana R$7 | Quinzena R$10 | Mês R$15
+- Roldanas: Diária R$2 | Semana R$10 | Quinzena R$15 | Mês R$20
 - Escoras: Diária R$3 | Semana R$15 | Quinzena R$17 | Mês R$20
 - Escada Pequena: Diária R$5 | Semana R$10 | Quinzena R$15 | Mês R$20
 
-APÓS ATENDER SOBRE EQUIPAMENTOS: No final do atendimento, envie DUAS mensagens separadas: primeiro "Dá uma olhada também nos outros equipamentos disponíveis 😊" e depois, numa mensagem separada, apenas o link: [LINK:https://lfarias.netlify.app/loca%C3%A7%C3%A3o-web/index.html]
-Quando o cliente confirmar interesse/locação: [AGENDAR:locacao_equipamento|NOME|equipamento e período]
+Após atender: "Dá uma olhada também nos outros equipamentos disponíveis 😊" e: [LINK:https://lfarias.netlify.app/loca%C3%A7%C3%A3o-web/index.html]
+Ao confirmar locação: [AGENDAR:locacao_equipamento|NOME|equipamento e período]
 
-## OUTRAS REGRAS
+## LOCALIZAÇÃO DO ESCRITÓRIO
+Quando alguém perguntar onde fica, o endereço ou como chegar:
+1. Mande o endereço: "Av. Joaquim Tetê, S/N - Centro, Canapi - AL 😊"
+2. Depois numa mensagem separada mande o link do mapa: [LINK:https://maps.app.goo.gl/EoUFU5EJcXL1gCvz7]
 
-### ESTILO
-Sempre curto e direto. Mensagens simples como no WhatsApp. Sem listas longas nem textos desnecessários. Sem asteriscos ou formatação markdown.
+## REGRAS GERAIS
+- Curto e direto. Sem listas longas. Sem asteriscos.
+- Desconto: "Sobre isso você precisa passar no escritório pessoalmente 😊"
+- Períodos especiais (ex 3 dias): multiplique pela diária
+- Mensagem pessoal: "Aqui é o atendimento da L Farias 😊 Posso te ajudar com loteamento ou locação?"
 
-### MENSAGENS PESSOAIS
-Se for claramente pessoal (convites, intimidades): "Aqui é o atendimento da L Farias 😊 Posso te ajudar com loteamento ou locação de equipamentos?"
-
-### DESCONTO
-Nunca negocie. Se pedirem: "Sobre isso você precisa falar com o Lucas pessoalmente no escritório 😊"
-
-### PERÍODOS ESPECIAIS (ex: 3 dias)
-Multiplique pela diária. Ex: 3 dias de betoneira = 3 x R$120 = R$360. Salve e diga: "Anotei! O responsável entra em contato pra confirmar 👍"
-
-### AGENDAMENTOS
-Colete apenas NOME e melhor dia/horário (NUNCA peça telefone nem CPF). Tipo: 'visita_terreno', 'duvida_parcela', 'pagamento_atrasado' ou 'outro'. Após salvar: "Perfeito! O responsável vai entrar em contato pra confirmar 👍"
-
-## TAGS (invisíveis ao cliente — coloque ao final da resposta)
-- Agendamento: [AGENDAR:tipo|nome|detalhe]
-- Link separado: [LINK:url]`;
+## TAGS (invisíveis ao cliente)
+- [AGENDAR:tipo|nome|detalhe]
+- [LINK:url]`;
 }
 
 async function chamarIA(telefone, texto) {
@@ -185,13 +236,94 @@ async function chamarIA(telefone, texto) {
   let linkSeparado = null;
   if (tagLink) linkSeparado = tagLink[1].trim();
 
-  const limpo = completa
-    .replace(/\[AGENDAR:[^\]]+\]/g, "")
-    .replace(/\[LINK:[^\]]+\]/g, "")
-    .trim();
-
+  const limpo = completa.replace(/\[AGENDAR:[^\]]+\]/g, "").replace(/\[LINK:[^\]]+\]/g, "").trim();
   hist.push({ role: "assistant", content: limpo });
   return { texto: limpo, agendamento, linkSeparado };
+}
+
+async function processarMensagens(sock, telefone, mensagens) {
+  const textoCompleto = mensagens.join("\n");
+  try {
+    await sock.sendPresenceUpdate("composing", telefone);
+    const { texto: resposta, agendamento, linkSeparado } = await chamarIA(telefone, textoCompleto);
+
+    if (agendamento) {
+      const r = salvarAgendamento(telefone, agendamento.nome, agendamento.tipo, agendamento.detalhe);
+      console.log(`📅 Agendamento #${r.id}: [${agendamento.tipo}] ${agendamento.nome}`);
+    }
+
+    await sock.sendMessage(telefone, { text: resposta });
+
+    if (linkSeparado) {
+      await new Promise(r => setTimeout(r, 1000));
+      await sock.sendMessage(telefone, { text: linkSeparado });
+    }
+
+    console.log(`✉️  Enviado para ${telefone}`);
+  } catch (e) { console.error("❌ Erro:", e.message); }
+}
+
+async function enviarRelatorio(sock) {
+  try {
+    const agora = new Date().toLocaleString("pt-BR", { timeZone: "America/Maceio" });
+    const agendamentos = db.data.agendamentos || [];
+    const audios = db.data.audios_pendentes || [];
+
+    // Pega agendamentos das últimas 4 horas
+    const quatroHoras = Date.now() - (4 * 60 * 60 * 1000);
+    const recentes = agendamentos.filter(a => a.id > quatroHoras);
+
+    let msg = `📊 *Relatório L Farias* — ${agora}\n\n`;
+
+    if (recentes.length === 0 && audios.length === 0) {
+      msg += "Nenhuma atividade nas últimas 4 horas.";
+    } else {
+      if (recentes.length > 0) {
+        msg += `📅 *Agendamentos (${recentes.length}):*\n`;
+        for (const a of recentes) {
+          const tipo = a.tipo === "visita_terreno" ? "Visita ao terreno" :
+                       a.tipo === "pagamento_atrasado" ? "Carnê/Parcela" :
+                       a.tipo === "locacao_equipamento" ? "Locação" : "Outro";
+          const num = a.telefone.replace("@lid", "").replace("@s.whatsapp.net", "").replace(/[^0-9]/g, "");
+          msg += `• ${tipo}: ${a.nome} — ${a.detalhe}\n`;
+          msg += `  https://wa.me/55${num}\n`;
+        }
+      }
+
+      if (audios.length > 0) {
+        msg += `\n🎤 *Áudios sem atendimento (${audios.length}):*\n`;
+        for (const a of audios) {
+          const numAudio = a.telefone.replace("@lid", "").replace("@s.whatsapp.net", "").replace(/[^0-9]/g, "");
+          msg += `• https://wa.me/55${numAudio} — ${a.recebido_em}\n`;
+        }
+        // Limpa lista de áudios após relatório
+        db.data.audios_pendentes = [];
+        db.write();
+      }
+    }
+
+    await sock.sendMessage(GRUPO_ID, { text: msg });
+    console.log("📊 Relatório enviado ao grupo");
+  } catch (e) {
+    console.error("❌ Erro ao enviar relatório:", e.message);
+  }
+}
+
+async function enviarMensagensFDS(sock) {
+  const fila = db.data.fila_fds || [];
+  if (fila.length === 0 || fdsJaEnviado) return;
+  fdsJaEnviado = true;
+  console.log(`📬 Enviando mensagens para ${fila.length} pessoa(s) do fim de semana...`);
+  for (const item of fila) {
+    try {
+      await sock.sendMessage(item.telefone, {
+        text: "Bom dia! 😊 Vi que você tentou falar comigo no fim de semana. Como posso te ajudar?"
+      });
+      await new Promise(r => setTimeout(r, 2000));
+    } catch (e) { console.error(`❌ Erro:`, e.message); }
+  }
+  limparFilaFDS();
+  setTimeout(() => { fdsJaEnviado = false; }, 3600000);
 }
 
 async function iniciarBot() {
@@ -215,35 +347,90 @@ async function iniciarBot() {
       if (cod !== DisconnectReason.loggedOut) { console.log("🔄 Reconectando..."); setTimeout(iniciarBot, 3000); }
       else console.log("🚪 Deslogado. Rode novamente.");
     }
-    if (connection === "open") console.log("✅ Bot conectado!");
+    if (connection === "open") {
+      console.log("✅ Bot conectado!");
+      if (isSegundaManha()) enviarMensagensFDS(sock);
+    }
   });
+
+  // Relatório a cada 4 horas
+  setInterval(() => enviarRelatorio(sock), 4 * 60 * 60 * 1000);
+
+  // Segunda às 8h: mensagens do fim de semana
+  setInterval(() => {
+    if (isSegundaManha()) enviarMensagensFDS(sock);
+  }, 60000);
 
   sock.ev.on("messages.upsert", async ({ messages, type }) => {
     if (type !== "notify") return;
     for (const msg of messages) {
-      if (msg.key.fromMe || msg.key.remoteJid.endsWith("@g.us")) continue;
+      // Verificar comandos do grupo PRIMEIRO (aceita mensagens próprias)
+      if (msg.key.remoteJid.endsWith("@g.us")) {
+        if (msg.key.remoteJid === GRUPO_ID) {
+          const txtGrupo = msg.message?.conversation || msg.message?.extendedTextMessage?.text || "";
+          if (txtGrupo && txtGrupo.trim() === "/pausar") {
+            botPausado = true;
+            await sock.sendMessage(GRUPO_ID, { text: "⏸️ Bot pausado! Mande /ligar para voltar." });
+            console.log("⏸️ Bot pausado via grupo");
+          } else if (txtGrupo && txtGrupo.trim() === "/ligar") {
+            botPausado = false;
+            await sock.sendMessage(GRUPO_ID, { text: "▶️ Bot ligado! Voltando a responder normalmente." });
+            console.log("▶️ Bot ligado via grupo");
+          }
+        }
+        continue;
+      }
+
+      if (msg.key.fromMe) continue;
+      if (msg.key.remoteJid.endsWith("@newsletter")) continue;
+
       const telefone = msg.key.remoteJid;
-      const texto = msg.message?.conversation || msg.message?.extendedTextMessage?.text || msg.message?.imageMessage?.caption;
+      const tipoMensagem = Object.keys(msg.message || {})[0];
+      const isAudio = tipoMensagem === "audioMessage" || tipoMensagem === "pttMessage";
+
+      // Bot pausado — ignora mensagens
+      if (botPausado) {
+        console.log(`⏸️ Bot pausado — mensagem de ${telefone} ignorada`);
+        continue;
+      }
+
+      // Áudio — salva para relatório e ignora
+      if (isAudio) {
+        salvarAudioPendente(telefone);
+        console.log(`🎤 Áudio salvo de ${telefone}`);
+        continue;
+      }
+
+      // Fora do horário
+      if (!isDentroDoHorario()) {
+        salvarFilaFDS(telefone);
+        console.log(`📵 Fora do horário — ${telefone} salvo`);
+        continue;
+      }
+
+      const texto =
+        msg.message?.conversation ||
+        msg.message?.extendedTextMessage?.text ||
+        msg.message?.imageMessage?.caption;
+
       if (!texto) continue;
+
       console.log(`📨 [${telefone}]: ${texto}`);
-      try {
-        await sock.sendPresenceUpdate("composing", telefone);
-        const { texto: resposta, agendamento, linkSeparado } = await chamarIA(telefone, texto);
 
-        if (agendamento) {
-          const r = salvarAgendamento(telefone, agendamento.nome, agendamento.tipo, agendamento.detalhe);
-          console.log(`📅 Agendamento #${r.id}: [${agendamento.tipo}] ${agendamento.nome}`);
-        }
+      if (!filaProcessamento.has(telefone)) filaProcessamento.set(telefone, []);
+      filaProcessamento.get(telefone).push(texto);
 
-        await sock.sendMessage(telefone, { text: resposta });
+      if (filaProcessamento.get(telefone).timer) {
+        clearTimeout(filaProcessamento.get(telefone).timer);
+      }
 
-        if (linkSeparado) {
-          await new Promise(r => setTimeout(r, 1000));
-          await sock.sendMessage(telefone, { text: linkSeparado });
-        }
+      const timer = setTimeout(async () => {
+        const pendentes = [...filaProcessamento.get(telefone)].filter(m => typeof m === "string");
+        filaProcessamento.delete(telefone);
+        if (pendentes.length > 0) await processarMensagens(sock, telefone, pendentes);
+      }, 3000);
 
-        console.log(`✉️  Enviado para ${telefone}`);
-      } catch (e) { console.error("❌ Erro:", e.message); }
+      filaProcessamento.get(telefone).timer = timer;
     }
   });
 }
