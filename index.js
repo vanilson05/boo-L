@@ -93,13 +93,9 @@ function getInfoHorario() {
   return { diaSemana, hora };
 }
 
-// Segunda a sábado: 8h-17h
+// Bot funciona 24 horas, 7 dias por semana
 function isDentroDoHorario() {
-  const { diaSemana, hora } = getInfoHorario();
-  if (diaSemana === "domingo") return false;
-  const diasAtivos = ["segunda-feira", "terça-feira", "quarta-feira", "quinta-feira", "sexta-feira", "sábado"];
-  if (!diasAtivos.includes(diaSemana)) return false;
-  return hora >= 8 && hora < 17;
+  return true;
 }
 
 function isSegundaManha() {
@@ -384,7 +380,32 @@ async function iniciarBot() {
     if (isSegundaManha()) enviarMensagensFDS(sock);
   }, 60000);
 
-  sock.ev.on("messages.upsert", async ({ messages, type }) => {
+  // Carregar histórico recente quando receber mensagem nova de um contato
+async function carregarHistoricoWhatsApp(sock, telefone) {
+  try {
+    if (historicos.has(telefone)) return; // já tem histórico em memória
+    const msgs = await sock.fetchMessagesFromWA(telefone, 10);
+    if (!msgs || msgs.length === 0) return;
+    const hist = [];
+    for (const m of msgs.reverse()) {
+      const txt = m.message?.conversation ||
+                  m.message?.extendedTextMessage?.text || "";
+      if (!txt) continue;
+      hist.push({
+        role: m.key.fromMe ? "assistant" : "user",
+        content: txt
+      });
+    }
+    if (hist.length > 0) {
+      historicos.set(telefone, hist);
+      console.log(`📚 Histórico carregado para ${telefone}: ${hist.length} msgs`);
+    }
+  } catch (e) {
+    // silencioso — nem todo número tem histórico
+  }
+}
+
+sock.ev.on("messages.upsert", async ({ messages, type }) => {
     if (type !== "notify") return;
     for (const msg of messages) {
       // Verificar comandos do grupo PRIMEIRO (aceita mensagens próprias)
@@ -405,6 +426,7 @@ async function iniciarBot() {
       }
 
       if (msg.key.fromMe) continue;
+      if (msg.key.remoteJid === "status@broadcast") continue;
       if (msg.key.remoteJid.endsWith("@newsletter")) continue;
 
       const telefone = msg.key.remoteJid;
@@ -430,10 +452,8 @@ async function iniciarBot() {
         console.log(`🖼️ Imagem recebida de ${telefone}`);
         try {
           const imgMsg = msg.message.imageMessage;
-          const stream = await sock.downloadMediaMessage(msg);
-          const chunks = [];
-          for await (const chunk of stream) chunks.push(chunk);
-          const buffer = Buffer.concat(chunks);
+          const { downloadMediaMessage } = await import("@whiskeysockets/baileys");
+          const buffer = await downloadMediaMessage(msg, "buffer", {});
           const base64 = buffer.toString("base64");
           const mediaType = imgMsg.mimetype || "image/jpeg";
 
@@ -477,6 +497,9 @@ Vou registrar e o responsável confirma em breve 👍`
       if (!texto) continue;
 
       console.log(`📨 [${telefone}]: ${texto}`);
+
+      // Carregar histórico do WhatsApp se ainda não tiver em memória
+      await carregarHistoricoWhatsApp(sock, telefone);
 
       if (!filaProcessamento.has(telefone)) filaProcessamento.set(telefone, []);
       filaProcessamento.get(telefone).push(texto);
