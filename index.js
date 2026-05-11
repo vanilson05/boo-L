@@ -17,8 +17,8 @@ if (!ANTHROPIC_API_KEY) {
 }
 const anthropic = new Anthropic({ apiKey: ANTHROPIC_API_KEY });
 
-// ID do grupo para relatórios
 const GRUPO_ID = "120363425619142357@g.us";
+const ARQUIVO_PAUSA = "./pausado.txt";
 let botPausado = false;
 
 const db = await JSONFilePreset("agendamentos.json", {
@@ -39,6 +39,7 @@ function salvarAgendamento(telefone, nome, tipo, detalhe) {
 }
 
 function salvarAudioPendente(telefone) {
+  if (!db.data.audios_pendentes) db.data.audios_pendentes = [];
   const jaExiste = db.data.audios_pendentes.find(a => a.telefone === telefone);
   if (!jaExiste) {
     db.data.audios_pendentes.push({
@@ -67,7 +68,6 @@ const historicos = new Map();
 const ultimaAtividade = new Map();
 const filaProcessamento = new Map();
 let fdsJaEnviado = false;
-const ARQUIVO_PAUSA = "./pausado.txt";
 
 function getHistorico(tel) {
   if (!historicos.has(tel)) historicos.set(tel, []);
@@ -80,7 +80,11 @@ setInterval(() => {
     if (agora - t > 7200000) { historicos.delete(tel); ultimaAtividade.delete(tel); }
 }, 600000);
 
-function getInfoHorario() {
+function isDentroDoHorario() {
+  return true;
+}
+
+function isSegundaManha() {
   const agora = new Date();
   const partes = new Intl.DateTimeFormat("pt-BR", {
     timeZone: "America/Maceio",
@@ -90,16 +94,6 @@ function getInfoHorario() {
   }).formatToParts(agora);
   const diaSemana = partes.find(p => p.type === "weekday")?.value;
   const hora = parseInt(partes.find(p => p.type === "hour")?.value);
-  return { diaSemana, hora };
-}
-
-// Bot funciona 24 horas, 7 dias por semana
-function isDentroDoHorario() {
-  return true;
-}
-
-function isSegundaManha() {
-  const { diaSemana, hora } = getInfoHorario();
   return diaSemana === "segunda-feira" && hora === 8;
 }
 
@@ -110,36 +104,30 @@ function buildSystemPrompt() {
 ## FUSO HORÁRIO
 Horário atual em Alagoas: ${horaAL}h (UTC-3). SEMPRE use esse fuso para saudação correta.
 
-## NOME DO CLIENTE — REGRA IMPORTANTE
-NUNCA assuma o nome da pessoa que está falando. Você só sabe o nome do cliente se ele disse explicitamente "meu nome é X" ou "sou X" em resposta a uma pergunta sua. Se alguém mencionar um nome qualquer sem dizer que é o próprio nome, NÃO assuma que é o nome dela.
-
 ## IDENTIDADE
 Seu nome é Jeferson. Se alguém perguntar seu nome, quem está atendendo ou se apresentar, diga que é o Jeferson e pergunte como pode ajudar.
 
 ## SOBRE O LUCAS — REGRA MAIS IMPORTANTE DO PROMPT
-Qualquer mensagem que contenha o nome "Lucas" — seja "boa tarde Lucas", "Lucas tem terreno?", "lucas esta?", "oi Lucas", "quero falar com Lucas", "Lucas vamos beber" — você DEVE responder EXATAMENTE assim (sem "Boa tarde!" antes, sem repetir saudação):
+Qualquer mensagem que contenha o nome "Lucas" — seja "boa tarde Lucas", "Lucas tem terreno?", "lucas esta?", "oi Lucas", "quero falar com Lucas", "obrigado Lucas" — você DEVE responder EXATAMENTE assim:
 
 "Agradecemos o seu contato! 😊 O Lucas não está disponível no momento. Caso queira continuar o atendimento, me chamo Jeferson e posso te ajudar."
 
-REGRAS DESTA MENSAGEM:
-- NUNCA comece com "Boa tarde!" ou qualquer saudação antes — a mensagem já tem tudo
-- NUNCA responda a pergunta antes (ex: se disser "Lucas tem terreno?", NÃO fale sobre terreno — use a mensagem acima)
+REGRAS:
+- NUNCA comece com saudação antes
+- NUNCA responda a pergunta antes de dar essa mensagem
 - NUNCA pergunte "você quer falar com o Lucas?"
-- SEMPRE use essa mensagem quando "Lucas" aparecer na mensagem
 
-Para qualquer outro encaminhamento presencial SEM mencionar Lucas, diga apenas "passa no escritório" ou "o responsável entra em contato".
+## NOME DO CLIENTE
+NUNCA assuma o nome da pessoa. Só sabe o nome se ele disse explicitamente.
 
-## LINKS E CONTEÚDO EXTERNO
-Se alguém mandar link (Instagram, YouTube, sites etc.), ignore completamente e responda: "Aqui é o atendimento da L Farias 😊 Posso te ajudar com loteamento ou locação de equipamentos?"
+## LINKS EXTERNOS
+Se alguém mandar link, ignore e responda: "Aqui é o atendimento da L Farias 😊 Posso te ajudar com loteamento ou locação de equipamentos?"
 
-## INTERPRETAÇÃO DE MENSAGENS
-Você é MUITO bom em interpretar mensagens com erros, abreviações e gírias:
-- "qto csta a beto" → betoneira | "tem retro livre" → retroescavadeira | "tô devend" → parcelas atrasadas | "qro um lot" → lote
-- "e oq" ou "e ai" → contexto anterior | "pode sê" → confirmação | "ta caro" → não negocie, escritório
-Só peça pra explicar se for ABSOLUTAMENTE impossível entender.
+## INTERPRETAÇÃO
+Interprete erros, abreviações e gírias. Só peça pra explicar se for impossível entender.
 
 ## DADOS DO CLIENTE
-NUNCA peça telefone nem CPF. Só peça o NOME quando necessário.
+NUNCA peça telefone nem CPF.
 
 ## SAUDAÇÃO INICIAL
 - Das 5h às 11h59: "Bom dia! 😊 Em que posso te ajudar?"
@@ -147,25 +135,24 @@ NUNCA peça telefone nem CPF. Só peça o NOME quando necessário.
 - Das 18h às 4h59: "Boa noite! 😊 Em que posso te ajudar?"
 
 ## LOTEAMENTO CONVIVER — Canapi, AL
-1. Pergunte se é em Canapi que está procurando
-2. Se confirmar, diga que temos lotes disponíveis e convide para visita
-3. Informe que a entrada é de R$ 200. NUNCA cite outros valores. Se perguntarem mais, diga que na visita explica tudo.
-4. Após atender: "Se quiser mais informações, dá uma olhada aqui 😊" e depois: [LINK:https://lfarias.netlify.app/paginas/enprende]
+1. Pergunte se é em Canapi
+2. Diga que temos lotes disponíveis e convide para visita
+3. Entrada de R$ 200. NUNCA cite outros valores.
+4. Após atender: [LINK:https://lfarias.netlify.app/paginas/enprende]
 
 AGENDAMENTO DE VISITA:
-- Atendimento: segunda a sábado, das 8h às 17h
-- Se sugerir domingo ou horário fora (após 17h ou antes de 8h): "As visitas são de segunda a sábado, das 8h às 17h 😊 Tem algum horário que funciona pra você?"
-- Ao receber nome + dia/hora válidos: "Perfeito! Vou deixar anotado e o responsável confirma com você pelo WhatsApp 👍" e salve: [AGENDAR:visita_terreno|NOME|dia e horário]
+- Segunda a sábado, 8h às 17h
+- Domingo ou fora do horário: "As visitas são de segunda a sábado, das 8h às 17h 😊 Tem algum horário?"
+- Ao agendar: "Perfeito! Vou deixar anotado e o responsável confirma pelo WhatsApp 👍" + [AGENDAR:visita_terreno|NOME|dia e horário]
 
 ## CARNÊ / PARCELAS ATRASADAS
-Quando o cliente falar sobre parcelas ou carnê atrasado:
-1. Não informe valores nem quantidade de parcelas
-2. Peça o NOME, CPF e RG do cliente para o responsável poder verificar
-3. Informe que ele pode também ir pessoalmente ao escritório para ser atendido e ver a melhor forma de resolver
-4. Quando tiver nome + CPF + RG: [AGENDAR:pagamento_atrasado|NOME|CPF: XXX RG: XXX]
-5. Diga: "Anotei! O responsável verifica e entra em contato em breve 👍 Se preferir, pode passar no escritório pessoalmente que a gente resolve da melhor forma 😊"
+1. Não informe valores
+2. Peça NOME, CPF e RG
+3. Pode ir ao escritório pessoalmente
+4. [AGENDAR:pagamento_atrasado|NOME|CPF: XXX RG: XXX]
+5. "Anotei! O responsável verifica em breve 👍 Pode passar no escritório também 😊"
 
-## EQUIPAMENTOS PARA LOCAÇÃO
+## EQUIPAMENTOS
 MÁQUINAS PESADAS:
 - Retroescavadeira: Diária R$1.500 | Semana R$7.000 | Quinzena R$12.500 | Mês R$18.000
 - Caminhão Basculante: Diária R$1.200 | Semana R$6.000 | Quinzena R$10.000 | Mês R$15.000
@@ -202,21 +189,21 @@ ESTRUTURAS (por unidade):
 - Escoras: Diária R$3 | Semana R$15 | Quinzena R$17 | Mês R$20
 - Escada Pequena: Diária R$5 | Semana R$10 | Quinzena R$15 | Mês R$20
 
-Após atender: "Dá uma olhada também nos outros equipamentos disponíveis 😊" e: [LINK:https://lfarias.netlify.app/loca%C3%A7%C3%A3o-web/index.html]
+Após atender: [LINK:https://lfarias.netlify.app/loca%C3%A7%C3%A3o-web/index.html]
 Ao confirmar locação: [AGENDAR:locacao_equipamento|NOME|equipamento e período]
 
-## LOCALIZAÇÃO DO ESCRITÓRIO
-Quando alguém perguntar onde fica, o endereço ou como chegar:
-1. Mande o endereço: "Av. Joaquim Tetê, S/N - Centro, Canapi - AL 😊"
-2. Depois numa mensagem separada mande o link do mapa: [LINK:https://maps.app.goo.gl/EoUFU5EJcXL1gCvz7]
+## LOCALIZAÇÃO
+Quando perguntar onde fica:
+1. "Av. Joaquim Tetê, S/N - Centro, Canapi - AL 😊"
+2. [LINK:https://maps.app.goo.gl/EoUFU5EJcXL1gCvz7]
 
 ## REGRAS GERAIS
-- Curto e direto. Sem listas longas. Sem asteriscos.
-- Desconto: "Sobre isso você precisa passar no escritório pessoalmente 😊"
-- Períodos especiais (ex 3 dias): multiplique pela diária
-- Mensagem pessoal: "Aqui é o atendimento da L Farias 😊 Posso te ajudar com loteamento ou locação?"
+- Curto e direto. Sem listas longas.
+- Desconto: "Passa no escritório pessoalmente 😊"
+- Períodos especiais: multiplique pela diária
+- Mensagem pessoal: "Aqui é o atendimento da L Farias 😊"
 
-## TAGS (invisíveis ao cliente)
+## TAGS
 - [AGENDAR:tipo|nome|detalhe]
 - [LINK:url]`;
 }
@@ -235,42 +222,47 @@ async function chamarIA(telefone, texto) {
   });
 
   const completa = response.content[0].text;
-
   const tagAgendamento = completa.match(/\[AGENDAR:([^\]]+)\]/);
   let agendamento = null;
   if (tagAgendamento) {
     const p = tagAgendamento[1].split("|");
     agendamento = { tipo: p[0]?.trim()||"outro", nome: p[1]?.trim()||"não informado", detalhe: p[2]?.trim()||"" };
   }
-
   const tagLink = completa.match(/\[LINK:([^\]]+)\]/);
   let linkSeparado = null;
   if (tagLink) linkSeparado = tagLink[1].trim();
-
   const limpo = completa.replace(/\[AGENDAR:[^\]]+\]/g, "").replace(/\[LINK:[^\]]+\]/g, "").trim();
   hist.push({ role: "assistant", content: limpo });
   return { texto: limpo, agendamento, linkSeparado };
 }
 
-async function analisarImagem(base64, mediaType) {
-  const response = await anthropic.messages.create({
-    model: "claude-haiku-4-5-20251001",
-    max_tokens: 1024,
-    messages: [{
-      role: "user",
-      content: [
-        {
-          type: "image",
-          source: { type: "base64", media_type: mediaType, data: base64 }
-        },
-        {
-          type: "text",
-          text: `Analise essa imagem. Se for um comprovante de pagamento/transferência, extraia: valor pago, data, nome do destinatário ou banco. Responda em português de forma curta e confirme se é um comprovante válido. Se não for comprovante, diga apenas: "NÃO_COMPROVANTE".`
-        }
-      ]
-    }]
-  });
-  return response.content[0].text;
+async function verificarComprovante(sock, msg, telefone) {
+  try {
+    // Baixar imagem
+    const { downloadMediaMessage } = await import("@whiskeysockets/baileys");
+    const buffer = await downloadMediaMessage(msg, "buffer", {}, { logger: pino({ level: "silent" }), reuploadRequest: sock.updateMediaMessage });
+    const base64 = buffer.toString("base64");
+    const mediaType = msg.message.imageMessage.mimetype || "image/jpeg";
+
+    // Analisar com Claude Vision
+    const response = await anthropic.messages.create({
+      model: "claude-haiku-4-5-20251001",
+      max_tokens: 256,
+      messages: [{
+        role: "user",
+        content: [
+          { type: "image", source: { type: "base64", media_type: mediaType, data: base64 } },
+          { type: "text", text: "Essa imagem é um comprovante de pagamento ou transferência bancária? Responda apenas: SIM ou NAO" }
+        ]
+      }]
+    });
+
+    const resposta = response.content[0].text.trim().toUpperCase();
+    return resposta.includes("SIM");
+  } catch (e) {
+    console.error("❌ Erro ao verificar imagem:", e.message);
+    return false;
+  }
 }
 
 async function processarMensagens(sock, telefone, mensagens) {
@@ -278,19 +270,15 @@ async function processarMensagens(sock, telefone, mensagens) {
   try {
     await sock.sendPresenceUpdate("composing", telefone);
     const { texto: resposta, agendamento, linkSeparado } = await chamarIA(telefone, textoCompleto);
-
     if (agendamento) {
       const r = salvarAgendamento(telefone, agendamento.nome, agendamento.tipo, agendamento.detalhe);
       console.log(`📅 Agendamento #${r.id}: [${agendamento.tipo}] ${agendamento.nome}`);
     }
-
     await sock.sendMessage(telefone, { text: resposta });
-
     if (linkSeparado) {
       await new Promise(r => setTimeout(r, 1000));
       await sock.sendMessage(telefone, { text: linkSeparado });
     }
-
     console.log(`✉️  Enviado para ${telefone}`);
   } catch (e) { console.error("❌ Erro:", e.message); }
 }
@@ -300,13 +288,9 @@ async function enviarRelatorio(sock) {
     const agora = new Date().toLocaleString("pt-BR", { timeZone: "America/Maceio" });
     const agendamentos = db.data.agendamentos || [];
     const audios = db.data.audios_pendentes || [];
-
-    // Pega agendamentos das últimas 4 horas
     const quatroHoras = Date.now() - (4 * 60 * 60 * 1000);
     const recentes = agendamentos.filter(a => a.id > quatroHoras);
-
     let msg = `📊 *Relatório L Farias* — ${agora}\n\n`;
-
     if (recentes.length === 0 && audios.length === 0) {
       msg += "Nenhuma atividade nas últimas 4 horas.";
     } else {
@@ -314,48 +298,59 @@ async function enviarRelatorio(sock) {
         msg += `📅 *Agendamentos (${recentes.length}):*\n`;
         for (const a of recentes) {
           const tipo = a.tipo === "visita_terreno" ? "Visita ao terreno" :
-                       a.tipo === "pagamento_atrasado" ? "Carnê/Parcela" :
-                       a.tipo === "locacao_equipamento" ? "Locação" : "Outro";
-          const num = a.telefone.replace("@lid", "").replace("@s.whatsapp.net", "").replace(/[^0-9]/g, "");
+            a.tipo === "pagamento_atrasado" ? "Carnê/Parcela" :
+            a.tipo === "locacao_equipamento" ? "Locação" :
+            a.tipo === "comprovante_pagamento" ? "Comprovante" : "Outro";
+          const num = a.telefone.replace("@lid","").replace("@s.whatsapp.net","").replace(/[^0-9]/g,"");
           msg += `• ${tipo}: ${a.nome} — ${a.detalhe}\n`;
           msg += `  https://wa.me/55${num}\n`;
         }
       }
-
       if (audios.length > 0) {
         msg += `\n🎤 *Áudios sem atendimento (${audios.length}):*\n`;
         for (const a of audios) {
-          const numAudio = a.telefone.replace("@lid", "").replace("@s.whatsapp.net", "").replace(/[^0-9]/g, "");
+          const numAudio = a.telefone.replace("@lid","").replace("@s.whatsapp.net","").replace(/[^0-9]/g,"");
           msg += `• https://wa.me/55${numAudio} — ${a.recebido_em}\n`;
         }
-        // Limpa lista de áudios após relatório
         db.data.audios_pendentes = [];
         db.write();
       }
     }
-
     await sock.sendMessage(GRUPO_ID, { text: msg });
     console.log("📊 Relatório enviado ao grupo");
-  } catch (e) {
-    console.error("❌ Erro ao enviar relatório:", e.message);
-  }
+  } catch (e) { console.error("❌ Erro ao enviar relatório:", e.message); }
 }
 
 async function enviarMensagensFDS(sock) {
   const fila = db.data.fila_fds || [];
   if (fila.length === 0 || fdsJaEnviado) return;
   fdsJaEnviado = true;
-  console.log(`📬 Enviando mensagens para ${fila.length} pessoa(s) do fim de semana...`);
   for (const item of fila) {
     try {
-      await sock.sendMessage(item.telefone, {
-        text: "Bom dia! 😊 Vi que você tentou falar comigo no fim de semana. Como posso te ajudar?"
-      });
+      await sock.sendMessage(item.telefone, { text: "Bom dia! 😊 Vi que você tentou falar comigo. Como posso te ajudar?" });
       await new Promise(r => setTimeout(r, 2000));
     } catch (e) { console.error(`❌ Erro:`, e.message); }
   }
   limparFilaFDS();
   setTimeout(() => { fdsJaEnviado = false; }, 3600000);
+}
+
+async function carregarHistoricoWhatsApp(sock, telefone) {
+  try {
+    if (historicos.has(telefone)) return;
+    const msgs = await sock.fetchMessagesFromWA(telefone, 10);
+    if (!msgs || msgs.length === 0) return;
+    const hist = [];
+    for (const m of msgs.reverse()) {
+      const txt = m.message?.conversation || m.message?.extendedTextMessage?.text || "";
+      if (!txt) continue;
+      hist.push({ role: m.key.fromMe ? "assistant" : "user", content: txt });
+    }
+    if (hist.length > 0) {
+      historicos.set(telefone, hist);
+      console.log(`📚 Histórico carregado para ${telefone}: ${hist.length} msgs`);
+    }
+  } catch (e) { /* silencioso */ }
 }
 
 async function iniciarBot() {
@@ -385,53 +380,26 @@ async function iniciarBot() {
     }
   });
 
-  // Relatório a cada 4 horas
   setInterval(() => enviarRelatorio(sock), 4 * 60 * 60 * 1000);
+  setInterval(() => { if (isSegundaManha()) enviarMensagensFDS(sock); }, 60000);
 
-  // Segunda às 8h: mensagens do fim de semana
-  setInterval(() => {
-    if (isSegundaManha()) enviarMensagensFDS(sock);
-  }, 60000);
-
-  // Carregar histórico recente quando receber mensagem nova de um contato
-async function carregarHistoricoWhatsApp(sock, telefone) {
-  try {
-    if (historicos.has(telefone)) return; // já tem histórico em memória
-    const msgs = await sock.fetchMessagesFromWA(telefone, 10);
-    if (!msgs || msgs.length === 0) return;
-    const hist = [];
-    for (const m of msgs.reverse()) {
-      const txt = m.message?.conversation ||
-                  m.message?.extendedTextMessage?.text || "";
-      if (!txt) continue;
-      hist.push({
-        role: m.key.fromMe ? "assistant" : "user",
-        content: txt
-      });
-    }
-    if (hist.length > 0) {
-      historicos.set(telefone, hist);
-      console.log(`📚 Histórico carregado para ${telefone}: ${hist.length} msgs`);
-    }
-  } catch (e) {
-    // silencioso — nem todo número tem histórico
-  }
-}
-
-sock.ev.on("messages.upsert", async ({ messages, type }) => {
+  sock.ev.on("messages.upsert", async ({ messages, type }) => {
     if (type !== "notify") return;
     for (const msg of messages) {
-      // Verificar comandos do grupo PRIMEIRO (aceita mensagens próprias)
+
+      // Comandos do grupo
       if (msg.key.remoteJid.endsWith("@g.us")) {
         if (msg.key.remoteJid === GRUPO_ID) {
           const txtGrupo = msg.message?.conversation || msg.message?.extendedTextMessage?.text || "";
           if (txtGrupo && txtGrupo.trim() === "/pausar") {
-            botPausado = true;
-            await sock.sendMessage(GRUPO_ID, { text: "⏸️ Bot pausado! Mande /ligar para voltar." });
+            const { writeFileSync } = await import("fs");
+            writeFileSync(ARQUIVO_PAUSA, "pausado");
+            await sock.sendMessage(GRUPO_ID, { text: "⏸️ Bot pausado!" });
             console.log("⏸️ Bot pausado via grupo");
           } else if (txtGrupo && txtGrupo.trim() === "/ligar") {
-            botPausado = false;
-            await sock.sendMessage(GRUPO_ID, { text: "▶️ Bot ligado! Voltando a responder normalmente." });
+            const { unlinkSync, existsSync: es } = await import("fs");
+            if (es(ARQUIVO_PAUSA)) unlinkSync(ARQUIVO_PAUSA);
+            await sock.sendMessage(GRUPO_ID, { text: "▶️ Bot ligado!" });
             console.log("▶️ Bot ligado via grupo");
           }
         }
@@ -444,85 +412,52 @@ sock.ev.on("messages.upsert", async ({ messages, type }) => {
 
       const telefone = msg.key.remoteJid;
       const tipoMensagem = Object.keys(msg.message || {})[0];
-      const isAudio = tipoMensagem === "audioMessage" || tipoMensagem === "pttMessage";
 
-      // Bot pausado — ignora mensagens
+      // Bot pausado
       if (existsSync(ARQUIVO_PAUSA)) {
         console.log(`⏸️ Bot pausado — mensagem de ${telefone} ignorada`);
         continue;
       }
 
-      // Áudio — salva para relatório e ignora
-      if (isAudio) {
+      // Áudio — ignora silenciosamente
+      if (tipoMensagem === "audioMessage" || tipoMensagem === "pttMessage") {
         salvarAudioPendente(telefone);
-        console.log(`🎤 Áudio salvo de ${telefone}`);
+        console.log(`🎤 Áudio ignorado de ${telefone}`);
         continue;
       }
 
-      // Imagem — tenta analisar como comprovante
-      const isImagem = tipoMensagem === "imageMessage";
-      if (isImagem) {
-        console.log(`🖼️ Imagem recebida de ${telefone}`);
-        try {
-          const imgMsg = msg.message.imageMessage;
-          const { downloadMediaMessage } = await import("@whiskeysockets/baileys");
-          const buffer = await downloadMediaMessage(msg, "buffer", {});
-          const base64 = buffer.toString("base64");
-          const mediaType = imgMsg.mimetype || "image/jpeg";
-
-          await sock.sendPresenceUpdate("composing", telefone);
-          const analise = await analisarImagem(base64, mediaType);
-
-          if (analise.includes("NÃO_COMPROVANTE")) {
-            await sock.sendMessage(telefone, {
-              text: "Recebi sua imagem, mas não consigo identificar o que é 😊 Pode me explicar em texto o que precisa?"
-            });
-          } else {
-            await sock.sendMessage(telefone, {
-              text: `✅ Comprovante recebido! ${analise}
-
-Vou registrar e o responsável confirma em breve 👍`
-            });
-            salvarAgendamento(telefone, "não informado", "comprovante_pagamento", analise);
-            console.log(`🧾 Comprovante salvo de ${telefone}`);
-          }
-        } catch (e) {
-          console.error("❌ Erro ao analisar imagem:", e.message);
+      // Imagem — verifica se é comprovante
+      if (tipoMensagem === "imageMessage") {
+        console.log(`🖼️ Imagem recebida de ${telefone} — verificando...`);
+        const isComprovante = await verificarComprovante(sock, msg, telefone);
+        if (isComprovante) {
           await sock.sendMessage(telefone, {
-            text: "Recebi sua imagem 😊 Pode me descrever em texto o que precisa?"
+            text: "Comprovante recebido! 😊 O responsável vai verificar e confirma com você em breve 👍"
           });
+          salvarAgendamento(telefone, "não informado", "comprovante_pagamento", "comprovante recebido via imagem");
+          console.log(`🧾 Comprovante salvo de ${telefone}`);
+        } else {
+          console.log(`🖼️ Imagem ignorada de ${telefone} — não é comprovante`);
         }
         continue;
       }
 
-      // Fora do horário
       if (!isDentroDoHorario()) {
         salvarFilaFDS(telefone);
-        console.log(`📵 Fora do horário — ${telefone} salvo`);
         continue;
       }
 
-      const texto =
-        msg.message?.conversation ||
-        msg.message?.extendedTextMessage?.text ||
-        msg.message?.imageMessage?.caption;
-
+      const texto = msg.message?.conversation || msg.message?.extendedTextMessage?.text;
       if (!texto) continue;
 
       console.log(`📨 [${telefone}]: ${texto}`);
-
-      // Carregar histórico do WhatsApp se ainda não tiver em memória
       await carregarHistoricoWhatsApp(sock, telefone);
 
       if (!filaProcessamento.has(telefone)) filaProcessamento.set(telefone, []);
-      // Evitar duplicatas — não adicionar mesma mensagem seguida
       const filaAtual = filaProcessamento.get(telefone);
       const ultimaMsg = filaAtual.filter(m => typeof m === "string").slice(-1)[0];
       if (ultimaMsg !== texto) filaAtual.push(texto);
-
-      if (filaProcessamento.get(telefone).timer) {
-        clearTimeout(filaProcessamento.get(telefone).timer);
-      }
+      if (filaAtual.timer) clearTimeout(filaAtual.timer);
 
       const timer = setTimeout(async () => {
         const pendentes = [...filaProcessamento.get(telefone)].filter(m => typeof m === "string");
@@ -530,7 +465,7 @@ Vou registrar e o responsável confirma em breve 👍`
         if (pendentes.length > 0) await processarMensagens(sock, telefone, pendentes);
       }, 3000);
 
-      filaProcessamento.get(telefone).timer = timer;
+      filaAtual.timer = timer;
     }
   });
 }
