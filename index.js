@@ -134,16 +134,27 @@ NUNCA peça telefone nem CPF.
 - Das 12h às 17h59: "Boa tarde! 😊 Em que posso te ajudar?"
 - Das 18h às 4h59: "Boa noite! 😊 Em que posso te ajudar?"
 
+## PASSAR PARA SETOR RESPONSÁVEL — REGRA IMPORTANTE
+Se o cliente:
+- Pedir informações muito detalhadas além do básico (condições especiais, negociação, financiamento)
+- Perguntar coisas que você não consegue responder com certeza
+- Precisar de uma análise personalizada da situação dele
+
+Responda: "Entendido! 😊 Vou encaminhar sua solicitação para o setor responsável que poderá te ajudar melhor. Em breve entrarão em contato 👍"
+E salve: [AGENDAR:encaminhamento_setor|NOME se souber|motivo resumido]
+
 ## LOTEAMENTO CONVIVER — Canapi, AL
-1. Pergunte se é em Canapi
-2. Diga que temos lotes disponíveis e convide para visita
-3. Entrada de R$ 200. NUNCA cite outros valores.
-4. Após atender: [LINK:https://lfarias.netlify.app/paginas/enprende]
+1. Pergunte se é em Canapi que está procurando
+2. Diga que temos lotes disponíveis e convide para uma visita sem compromisso
+3. Deixe claro que a visita é sem compromisso — o cliente conhece o terreno e decide na hora se quiser
+4. Entrada de R$ 200. NUNCA cite outros valores ou parcelas.
+5. Após atender: [LINK:https://lfarias.netlify.app/paginas/enprende]
 
 AGENDAMENTO DE VISITA:
 - Segunda a sábado, 8h às 17h
+- Se o cliente não for da cidade ou estiver longe: ofereça também atendimento pelo WhatsApp e diga que o responsável pode explicar tudo por aqui mesmo
 - Domingo ou fora do horário: "As visitas são de segunda a sábado, das 8h às 17h 😊 Tem algum horário?"
-- Ao agendar: "Perfeito! Vou deixar anotado e o responsável confirma pelo WhatsApp 👍" + [AGENDAR:visita_terreno|NOME|dia e horário]
+- Ao agendar: "Perfeito! Vou deixar anotado. É uma visita sem compromisso, você conhece o terreno e decide com calma 😊 O responsável confirma pelo WhatsApp 👍" + [AGENDAR:visita_terreno|NOME|dia e horário]
 
 ## CARNÊ / PARCELAS ATRASADAS
 1. Não informe valores
@@ -238,13 +249,10 @@ async function chamarIA(telefone, texto) {
 
 async function verificarComprovante(sock, msg, telefone) {
   try {
-    // Baixar imagem
     const { downloadMediaMessage } = await import("@whiskeysockets/baileys");
     const buffer = await downloadMediaMessage(msg, "buffer", {}, { logger: pino({ level: "silent" }), reuploadRequest: sock.updateMediaMessage });
     const base64 = buffer.toString("base64");
     const mediaType = msg.message.imageMessage.mimetype || "image/jpeg";
-
-    // Analisar com Claude Vision
     const response = await anthropic.messages.create({
       model: "claude-haiku-4-5-20251001",
       max_tokens: 256,
@@ -256,9 +264,7 @@ async function verificarComprovante(sock, msg, telefone) {
         ]
       }]
     });
-
-    const resposta = response.content[0].text.trim().toUpperCase();
-    return resposta.includes("SIM");
+    return response.content[0].text.trim().toUpperCase().includes("SIM");
   } catch (e) {
     console.error("❌ Erro ao verificar imagem:", e.message);
     return false;
@@ -300,7 +306,8 @@ async function enviarRelatorio(sock) {
           const tipo = a.tipo === "visita_terreno" ? "Visita ao terreno" :
             a.tipo === "pagamento_atrasado" ? "Carnê/Parcela" :
             a.tipo === "locacao_equipamento" ? "Locação" :
-            a.tipo === "comprovante_pagamento" ? "Comprovante" : "Outro";
+            a.tipo === "comprovante_pagamento" ? "Comprovante" :
+            a.tipo === "atendimento_humano" ? "⚠️ Atendimento humano" : "Outro";
           const num = a.telefone.replace("@lid","").replace("@s.whatsapp.net","").replace(/[^0-9]/g,"");
           msg += `• ${tipo}: ${a.nome} — ${a.detalhe}\n`;
           msg += `  https://wa.me/55${num}\n`;
@@ -387,7 +394,6 @@ async function iniciarBot() {
     if (type !== "notify") return;
     for (const msg of messages) {
 
-      // Comandos do grupo
       if (msg.key.remoteJid.endsWith("@g.us")) {
         if (msg.key.remoteJid === GRUPO_ID) {
           const txtGrupo = msg.message?.conversation || msg.message?.extendedTextMessage?.text || "";
@@ -413,20 +419,17 @@ async function iniciarBot() {
       const telefone = msg.key.remoteJid;
       const tipoMensagem = Object.keys(msg.message || {})[0];
 
-      // Bot pausado
       if (existsSync(ARQUIVO_PAUSA)) {
         console.log(`⏸️ Bot pausado — mensagem de ${telefone} ignorada`);
         continue;
       }
 
-      // Áudio — ignora silenciosamente
       if (tipoMensagem === "audioMessage" || tipoMensagem === "pttMessage") {
         salvarAudioPendente(telefone);
         console.log(`🎤 Áudio ignorado de ${telefone}`);
         continue;
       }
 
-      // Imagem — verifica se é comprovante
       if (tipoMensagem === "imageMessage") {
         console.log(`🖼️ Imagem recebida de ${telefone} — verificando...`);
         const isComprovante = await verificarComprovante(sock, msg, telefone);
