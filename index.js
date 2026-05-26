@@ -67,6 +67,7 @@ function limparFilaFDS() {
 const historicos = new Map();
 const ultimaAtividade = new Map();
 const filaProcessamento = new Map();
+const contatosConhecidos = new Set();
 let fdsJaEnviado = false;
 
 function getHistorico(tel) {
@@ -496,4 +497,4 @@ async function iniciarBot() {
 }
 
 console.log("🤖 Bot L Farias iniciando...");
-iniciarBot(); 
+iniciarBot();
