@@ -8,7 +8,7 @@ import Anthropic from "@anthropic-ai/sdk";
 import qrcode from "qrcode-terminal";
 import pino from "pino";
 import { JSONFilePreset } from "lowdb/node";
-import { existsSync } from "fs";
+import { existsSync, rmSync } from "fs";
 
 const ANTHROPIC_API_KEY = process.env.ANTHROPIC_API_KEY;
 if (!ANTHROPIC_API_KEY) {
@@ -69,6 +69,7 @@ const ultimaAtividade = new Map();
 const filaProcessamento = new Map();
 const contatosConhecidos = new Set();
 let fdsJaEnviado = false;
+let authResetInProgress = false;
 
 function getHistorico(tel) {
   if (!historicos.has(tel)) historicos.set(tel, []);
@@ -98,20 +99,41 @@ function isSegundaManha() {
   return diaSemana === "segunda-feira" && hora === 8;
 }
 
+function detectarOutrosServicos(texto) {
+  if (!texto) return null;
+  const t = texto.toLowerCase();
+  if (/\b(servi[cç]o|obra|reforma|constru[cç][aã]o|material|materiais|projeto|or[cç]amento|instala[cç][aã]o|manuten[cç][aã]o)\b/.test(t)) {
+    return { tipo: "outros_servicos", detalhe: "demanda de outros serviços" };
+  }
+  return null;
+}
+
+function detectarFornecedorVendedor(texto) {
+  if (!texto) return null;
+  const t = texto.toLowerCase();
+  if (/\b(fornecedor|fornecedora|vendedor|vendedora|revenda|representante|proposta|cotac[aã]o|cat[aá]logo|fornecimento|parceria)\b/.test(t)) {
+    return { tipo: "fornecedor_vendedor", detalhe: texto.trim().slice(0, 120) };
+  }
+  return null;
+}
+
 function buildSystemPrompt() {
   const horaAL = ((new Date().getUTCHours() - 3) + 24) % 24;
   return `Você representa o negócio de Lucas Farias em Canapi, Alagoas. Converse de forma cordial, educada e um pouco mais formal, mas ainda natural e próxima — como um bom atendente no WhatsApp. NUNCA se apresente como assistente, robô ou IA.
+
+## ATENDIMENTO PADRÃO
+Em toda conversa, comece de forma acolhedora e natural, como um atendimento humano. Sempre que não houver uma regra específica, responda com uma saudação curta, diga que é o atendente da L Farias e pergunte como pode ajudar. Exemplo: "Olá! 😊 Sou o atendente da L Farias, como posso te ajudar?"
 
 ## FUSO HORÁRIO
 Horário atual em Alagoas: ${horaAL}h (UTC-3). SEMPRE use esse fuso para saudação correta.
 
 ## IDENTIDADE
-Seu nome é Jeferson. Se alguém perguntar seu nome, quem está atendendo ou se apresentar, diga que é o Jeferson e pergunte como pode ajudar.
+Se alguém perguntar seu nome, quem está atendendo ou se apresentar, diga que é o atendente da L Farias e pergunte como pode ajudar.
 
 ## SOBRE O LUCAS — REGRA MAIS IMPORTANTE DO PROMPT
 Qualquer mensagem que contenha o nome "Lucas" — seja "boa tarde Lucas", "Lucas tem terreno?", "lucas esta?", "oi Lucas", "quero falar com Lucas", "obrigado Lucas" — você DEVE responder EXATAMENTE assim:
 
-"Agradecemos o seu contato! 😊 O Lucas não está disponível no momento. Caso queira continuar o atendimento, me chamo Jeferson e posso te ajudar."
+"Agradecemos o seu contato! 😊 O Lucas não está disponível no momento. Caso queira continuar o atendimento, sou o atendente da L Farias e posso te ajudar."
 
 REGRAS:
 - NUNCA comece com saudação antes
@@ -155,6 +177,17 @@ Trabalhamos com lotes APENAS em Canapi/AL.
 
 ## EQUIPAMENTOS — REGRAS DE LOCAÇÃO — MUITO IMPORTANTE
 NUNCA confirme disponibilidade. NUNCA marque data, horário ou local de entrega. NUNCA diga que o equipamento está disponível. Isso é EXCLUSIVO do responsável.
+
+## OUTROS SERVIÇOS / OBRAS / MATERIAIS
+Se o cliente falar sobre serviço, obra, reforma, construção, material, projeto, orçamento ou instalação:
+1. Responda: "Entendido! 😊 Vou encaminhar sua solicitação para o setor responsável, que poderá te ajudar melhor com esse assunto. Em breve entrarão em contato 👍"
+2. Salve: [AGENDAR:outros_servicos|NOME se souber|assunto]
+
+## FORNECEDORES E VENDEDORES
+Se o cliente falar sobre fornecedor, vendedor, proposta, cotação, catálogo, parceria ou fornecimento:
+1. NUNCA diga se quer ou não. NUNCA ofereça loteamento ou locação.
+2. Responda de forma acolhedora e objetiva: "Olá! 😊 Sou o Jeferson. Vou encaminhar sua proposta para o responsável. Por favor, envie a proposta detalhada aqui na conversa e aguarde o retorno do responsável. Obrigado pelo contato!"
+3. Salve: [AGENDAR:fornecedor_vendedor|NOME se souber|proposta]
 
 Se o cliente perguntar por um equipamento que NÃO está na lista abaixo, NÃO informe preço, NÃO diga que temos e NÃO diga que não temos.
 Responda apenas: "Certo! 😊 Vou passar para o responsável verificar isso e ele retorna por aqui assim que olhar."
@@ -322,6 +355,8 @@ async function enviarRelatorio(sock) {
             a.tipo === "pagamento_atrasado" ? "Carnê/Parcela" :
             a.tipo === "locacao_equipamento" ? "Locação" :
             a.tipo === "comprovante_pagamento" ? "Comprovante" :
+            a.tipo === "outros_servicos" ? "Outros serviços" :
+            a.tipo === "fornecedor_vendedor" ? "Fornecedor/Vendedor" :
             a.tipo === "atendimento_humano" ? "⚠️ Atendimento humano" : "Outro";
           const num = a.telefone.replace("@lid","").replace("@s.whatsapp.net","").replace(/[^0-9]/g,"");
           msg += `• ${tipo}: ${a.nome} — ${a.detalhe}\n`;
@@ -393,8 +428,20 @@ async function iniciarBot() {
     if (qr) { console.log("\n📱 Escaneie o QR Code:\n"); qrcode.generate(qr, { small: true }); }
     if (connection === "close") {
       const cod = lastDisconnect?.error?.output?.statusCode;
-      if (cod !== DisconnectReason.loggedOut) { console.log("🔄 Reconectando..."); setTimeout(iniciarBot, 3000); }
-      else console.log("🚪 Deslogado. Rode novamente.");
+      if (cod === DisconnectReason.loggedOut) {
+        console.log("🔐 Sessão inválida ou deslogada. Limpando credenciais e iniciando nova autenticação...");
+        if (!authResetInProgress) {
+          authResetInProgress = true;
+          try { rmSync("./auth_info", { recursive: true, force: true }); } catch (e) { console.error("❌ Não foi possível limpar auth_info:", e.message); }
+          setTimeout(() => {
+            authResetInProgress = false;
+            iniciarBot();
+          }, 3000);
+        }
+      } else {
+        console.log("🔄 Reconectando...");
+        setTimeout(iniciarBot, 3000);
+      }
     }
     if (connection === "open") {
       console.log("✅ Bot conectado!");
@@ -460,12 +507,34 @@ async function iniciarBot() {
         continue;
       }
 
+      const texto = msg.message?.conversation || msg.message?.extendedTextMessage?.text;
+      if (texto) {
+        const fornecedorVendedor = detectarFornecedorVendedor(texto);
+        if (fornecedorVendedor) {
+          salvarAgendamento(telefone, "não informado", fornecedorVendedor.tipo, fornecedorVendedor.detalhe);
+          await sock.sendMessage(telefone, {
+            text: "Olá! 😊 Sou o atendente da L Farias. Vou encaminhar sua proposta para o responsável. Por favor, envie a proposta detalhada aqui na conversa e aguarde o retorno do responsável. Obrigado pelo contato!"
+          });
+          console.log(`🧾 Novo contato de fornecedor/vendedor de ${telefone}`);
+          continue;
+        }
+
+        const outrosServicos = detectarOutrosServicos(texto);
+        if (outrosServicos) {
+          salvarAgendamento(telefone, "não informado", outrosServicos.tipo, outrosServicos.detalhe);
+          await sock.sendMessage(telefone, {
+            text: "Olá! 😊 Sou o atendente da L Farias. Vou encaminhar sua solicitação para o setor responsável, que poderá te ajudar melhor com esse assunto. Em breve entrarão em contato 👍"
+          });
+          console.log(`🧩 Novo atendimento de outros serviços de ${telefone}`);
+          continue;
+        }
+      }
+
       if (!isDentroDoHorario()) {
         salvarFilaFDS(telefone);
         continue;
       }
 
-      const texto = msg.message?.conversation || msg.message?.extendedTextMessage?.text;
       if (!texto) continue;
 
       console.log(`📨 [${telefone}]: ${texto}`);
