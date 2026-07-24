@@ -219,6 +219,7 @@ MÁQUINAS PESADAS:
 - Retroescavadeira: Diária R$1.500 | Semana R$7.000 | Quinzena R$12.500 | Mês R$18.000
 - Caminhão Basculante: Diária R$1.200 | Semana R$6.000 | Quinzena R$10.000 | Mês R$15.000
 - Compactador: Diária R$150 | Semana R$450 | Quinzena R$800 | Mês R$1.350
+- Perfurador de Solo: Diária R$150,00 | Semana R$480,00 | Quinzena R$900,00 | Mês R$1.500,00
 
 FERRAMENTAS:
 - Compressor Pneumático: Diária R$700 | Semana R$3.000 | Quinzena R$4.000 | Mês R$6.000
